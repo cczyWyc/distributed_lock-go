@@ -10,6 +10,8 @@ import (
 )
 
 var (
+	ErrLockNotHold         = errors.New("not holding lock")
+	ErrFailedToPreemptLock = errors.New("add lock failed")
 	//go:embed unlock.lua
 	luaUnlock string
 )
@@ -40,15 +42,15 @@ func newLock(client redis.Cmdable, key string, value string) *Lock {
 	}
 }
 
-// Lock add lock with key
-func (c *Client) Lock(ctx context.Context, key string, expiration time.Duration) (*Lock, error) {
+// TryLock add lock with key
+func (c *Client) TryLock(ctx context.Context, key string, expiration time.Duration) (*Lock, error) {
 	value := uuid.New().String()
 	res, err := c.client.SetNX(ctx, key, value, expiration).Result()
 	if err != nil {
 		return nil, err
 	}
 	if !res {
-		return nil, errors.New("add lock failed")
+		return nil, ErrFailedToPreemptLock
 	}
 
 	return newLock(c.client, key, value), nil
@@ -56,7 +58,18 @@ func (c *Client) Lock(ctx context.Context, key string, expiration time.Duration)
 
 // Unlock unlock a lock
 func (l *Lock) Unlock(ctx context.Context) error {
-	l.client.Eval(ctx, luaUnlock, []string{l.key}, l.value)
+	res, err := l.client.Eval(ctx, luaUnlock, []string{l.key}, l.value).Int64()
+
+	if err == redis.Nil {
+		return ErrLockNotHold
+	}
+	if err != nil {
+		return err
+	}
+	if res == 0 {
+		// the lock is not yours, or the key does not exist
+		return ErrLockNotHold
+	}
 
 	return nil
 }
